@@ -1,0 +1,52 @@
+# 环境变量
+.env
+.env.local
+
+# 日志文件
+*.log
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 临时文件
+temp/
+*.tmp
+
+# 扩展目录（保留 README 和 __init__.py）
+extensions/*
+!extensions/__init__.py
+!extensions/README.md
+!extensions/example_extension.py
+
+# 操作系统
+.DS_Store
+Thumbs.db

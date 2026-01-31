@@ -1,0 +1,6 @@
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+requests==2.31.0
+requests-toolbelt>=1.0.0
+python-dotenv==1.0.0
+watchdog>=3.0.0
