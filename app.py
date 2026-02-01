@@ -199,11 +199,10 @@ async def startup_event():
         # 预获取 tenant_access_token
         feishu_client.get_tenant_access_token()
         logger.info("飞书客户端初始化成功")
-        
+
         # 启动定期清理任务
         import asyncio
         asyncio.create_task(cleanup_old_events_task())
-        asyncio.create_task(cleanup_old_conversations())
         logger.info("定期清理任务已启动")
     except Exception as e:
         logger.error(f"服务启动失败: {e}", exc_info=True)
@@ -221,19 +220,6 @@ async def cleanup_old_events_task():
             event_db.clean_old_events(hours=24)
         except Exception as e:
             logger.error(f"清理任务执行失败: {e}", exc_info=True)
-
-
-async def cleanup_old_conversations():
-    """定期清理过期的对话上下文"""
-    import asyncio
-    import time
-    while True:
-        try:
-            # 每 30 分钟清理一次
-            await asyncio.sleep(1800)
-            event_db.clean_expired_conversations(hours=2)
-        except Exception as e:
-            logger.error(f"清理对话上下文失败: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

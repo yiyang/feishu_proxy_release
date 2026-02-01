@@ -6,6 +6,7 @@ from typing import Optional, List, Dict
 from datetime import datetime
 from config import config
 from extension_loader import ExtensionLoader
+from database import get_event_db
 
 logger = logging.getLogger(__name__)
 
@@ -17,15 +18,34 @@ class LLMClient:
         # 存储已回复的消息哈希 {conversation_id: set of message_hashes}
         # 用于避免重复推送相同回复
         self.sent_replies: Dict[str, set] = {}
-        # token限制（留出余量给系统提示词和回复）
-        self.max_tokens = 6000
-        # 每个token大约对应多少个字符（粗略估算）
-        self.chars_per_token = 3
+        # 标记哪些对话已加载到内存 {conversation_id: bool}
+        self.conversation_loaded: Dict[str, bool] = {}
+
+        # 配置参数
+        self.max_history_tokens = 80000  # 历史记录最大 token 数（留 48K 给系统提示词+新消息+回复）
+        self.chars_per_token = 3  # 粗略估算：每3个字符约1个token
+
+        # 获取数据库实例
+        self.event_db = get_event_db()
 
         # 初始化扩展加载器
         self.extension_loader = ExtensionLoader()
         self.extension_loader.load_all()
         self.extension_loader.start_watching()
+
+    def _load_conversation_from_db(self, conversation_id: str):
+        """从数据库加载对话历史到内存"""
+        if conversation_id in self.conversation_loaded:
+            return  # 已经加载过了
+
+        messages = self.event_db.get_messages(conversation_id)
+        if messages:
+            self.conversation_history[conversation_id] = messages
+            logger.info(f"从数据库加载了 {len(messages)} 条历史消息 (conversation_id={conversation_id})")
+        else:
+            self.conversation_history[conversation_id] = []
+
+        self.conversation_loaded[conversation_id] = True
 
     def _route_to_extension(self, user_message: str) -> Optional[str]:
         """
@@ -97,35 +117,16 @@ class LLMClient:
             logger.error(f"LLM 路由失败: {e}", exc_info=True)
             return None
         
-    def _estimate_tokens(self, text: str) -> int:
-        """估算文本的token数量"""
-        return len(text) // self.chars_per_token
-    
-    def _calculate_history_tokens(self, conversation_id: str) -> int:
-        """计算当前对话历史的token数量"""
-        if conversation_id not in self.conversation_history:
-            return 0
-        
-        total = 0
-        for msg in self.conversation_history[conversation_id]:
-            total += self._estimate_tokens(msg.get("content", ""))
-        return total
-    
-    def _is_near_limit(self, conversation_id: str, threshold: float = 0.85) -> bool:
-        """检查是否接近token限制"""
-        current_tokens = self._calculate_history_tokens(conversation_id)
-        return current_tokens >= self.max_tokens * threshold
-    
     def _has_asked_reset(self, conversation_id: str) -> bool:
         """检查是否已经询问过用户是否重置对话"""
         return conversation_id in self.sent_replies and "__RESET_ASKED__" in self.sent_replies[conversation_id]
-    
+
     def _mark_reset_asked(self, conversation_id: str):
         """标记已询问过用户是否重置对话"""
         if conversation_id not in self.sent_replies:
             self.sent_replies[conversation_id] = set()
         self.sent_replies[conversation_id].add("__RESET_ASKED__")
-    
+
     def _clear_reset_asked(self, conversation_id: str):
         """清除重置询问标记"""
         if conversation_id in self.sent_replies and "__RESET_ASKED__" in self.sent_replies[conversation_id]:
@@ -139,15 +140,20 @@ class LLMClient:
         self._clear_reset_asked(conversation_id)
     
     def _add_to_history(self, conversation_id: str, role: str, content: str):
-        """添加消息到对话历史（带时间戳）"""
+        """添加消息到对话历史（带时间戳），同时写入数据库"""
         if conversation_id not in self.conversation_history:
             self.conversation_history[conversation_id] = []
-        
-        self.conversation_history[conversation_id].append({
+
+        # 添加到内存
+        message = {
             "role": role,
             "content": content,
             "timestamp": datetime.now().isoformat()
-        })
+        }
+        self.conversation_history[conversation_id].append(message)
+
+        # 同时写入数据库
+        self.event_db.add_message(conversation_id, role, content)
     
     def _build_conversation_prompt(self, conversation_id: str, new_message: str) -> str:
         """构建包含对话历史的提示词（带时间线）"""
@@ -249,39 +255,23 @@ class LLMClient:
             # 确保有conversation_id
             if not conversation_id:
                 conversation_id = "default_conversation"
-            
+
             # 初始化已回复记录
             if conversation_id not in self.sent_replies:
                 self.sent_replies[conversation_id] = set()
-            
-            # 检查是否已经询问过用户是否重置对话
-            reset_asked = self._has_asked_reset(conversation_id)
-            
-            # 如果已经询问过，检查用户是否确认重置
-            if reset_asked:
-                # 检查用户是否确认开始新对话
-                confirm_keywords = ["是", "好的", "可以", "ok", "yes", "确认", "新的", "重置", "清空"]
-                if any(keyword in message.lower() for keyword in confirm_keywords):
-                    # 用户确认重置，清空对话历史
-                    self.reset_conversation(conversation_id)
-                    logger.debug(f"用户确认重置对话 {conversation_id}")
-                    return "好的，我已经清空了之前的对话上下文，我们可以开始新的话题了！😊", conversation_id
-                else:
-                    # 用户没有确认重置，清除询问标记，继续正常处理
-                    self._clear_reset_asked(conversation_id)
-            
-            # 检查是否接近token限制
-            near_limit = self._is_near_limit(conversation_id)
-            
-            # 如果接近限制且还没询问过，先询问用户
-            if near_limit and not reset_asked:
-                self._mark_reset_asked(conversation_id)
-                logger.debug(f"对话 {conversation_id} 接近 token 限制，询问用户是否重置")
-                return (
-                    "我们的对话上下文快要达到限制了，可能会影响后续对话的质量。\n\n"
-                    "🤔 你是否要开始一个新的对话？回复\"是\"或\"好的\"即可清空之前的上下文。",
-                    conversation_id
-                )
+
+            # 从数据库加载对话历史（首次）
+            self._load_conversation_from_db(conversation_id)
+
+            # 实现滑动窗口：如果历史超过 80K token，截断最旧的消息
+            current_tokens = sum(len(msg['content']) // self.chars_per_token for msg in self.conversation_history.get(conversation_id, []))
+            if current_tokens > self.max_history_tokens:
+                # 在数据库中截断
+                self.event_db.truncate_conversation_to_max_tokens(conversation_id, self.max_history_tokens, self.chars_per_token)
+                # 重新加载到内存
+                messages = self.event_db.get_messages(conversation_id)
+                self.conversation_history[conversation_id] = messages
+                logger.info(f"对话 {conversation_id} 已截断，保留最新 {len(messages)} 条消息")
 
             # 先用 LLM 判断应该由哪个扩展处理（避免每个扩展都调用 can_handle）
             extension_name = self._route_to_extension(message)

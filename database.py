@@ -95,17 +95,33 @@ class EventDB:
                         last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
-                
+
+                # 创建对话消息表
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS conversation_messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        conversation_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        message_index INTEGER NOT NULL
+                    )
+                """)
+
                 # 创建索引提升查询性能
                 conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_processed_events_time 
+                    CREATE INDEX IF NOT EXISTS idx_processed_events_time
                     ON processed_events(processed_at)
                 """)
                 conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_conversation_last_used 
+                    CREATE INDEX IF NOT EXISTS idx_conversation_last_used
                     ON conversation_contexts(last_used)
                 """)
-                
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_messages_conversation
+                    ON conversation_messages(conversation_id, message_index)
+                """)
+
                 conn.commit()
             
             logger.info(f"数据库初始化成功: {self.db_path} (WAL 模式)")
@@ -205,7 +221,153 @@ class EventDB:
         except Exception as e:
             logger.error(f"更新对话使用时间失败: {e}", exc_info=True)
             return False
-    
+
+    # ==================== 对话历史管理 ====================
+
+    def add_message(self, conversation_id: str, role: str, content: str) -> bool:
+        """添加消息到对话历史"""
+        try:
+            with self.pool.get_connection() as conn:
+                # 获取当前最大索引
+                cursor = conn.execute(
+                    "SELECT COALESCE(MAX(message_index), -1) FROM conversation_messages WHERE conversation_id = ?",
+                    (conversation_id,)
+                )
+                max_index = cursor.fetchone()[0]
+
+                # 插入新消息
+                conn.execute("""
+                    INSERT INTO conversation_messages (conversation_id, role, content, message_index)
+                    VALUES (?, ?, ?, ?)
+                """, (conversation_id, role, content, max_index + 1))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"添加消息失败: {e}", exc_info=True)
+            return False
+
+    def get_messages(self, conversation_id: str, limit: Optional[int] = None) -> list:
+        """获取对话历史消息"""
+        try:
+            with self.pool.get_connection() as conn:
+                if limit:
+                    cursor = conn.execute("""
+                        SELECT role, content, timestamp, message_index
+                        FROM conversation_messages
+                        WHERE conversation_id = ?
+                        ORDER BY message_index DESC
+                        LIMIT ?
+                    """, (conversation_id, limit))
+                else:
+                    cursor = conn.execute("""
+                        SELECT role, content, timestamp, message_index
+                        FROM conversation_messages
+                        WHERE conversation_id = ?
+                        ORDER BY message_index ASC
+                    """, (conversation_id,))
+
+                messages = []
+                for row in cursor.fetchall():
+                    messages.append({
+                        "role": row["role"],
+                        "content": row["content"],
+                        "timestamp": row["timestamp"],
+                        "message_index": row["message_index"]
+                    })
+
+                # 如果使用了 limit 且按降序查询，需要反转回来
+                if limit:
+                    messages.reverse()
+
+                return messages
+        except Exception as e:
+            logger.error(f"获取对话历史失败: {e}", exc_info=True)
+            return []
+
+    def delete_messages_before(self, conversation_id: str, keep_index: int) -> int:
+        """删除指定索引之前的消息（保留 keep_index 及之后的）"""
+        try:
+            with self.pool.get_connection() as conn:
+                cursor = conn.execute("""
+                    DELETE FROM conversation_messages
+                    WHERE conversation_id = ? AND message_index < ?
+                """, (conversation_id, keep_index))
+                deleted_count = cursor.rowcount
+                conn.commit()
+                if deleted_count > 0:
+                    logger.info(f"删除了 {deleted_count} 条历史消息 (conversation_id={conversation_id})")
+                return deleted_count
+        except Exception as e:
+            logger.error(f"删除历史消息失败: {e}", exc_info=True)
+            return 0
+
+    def get_message_count(self, conversation_id: str) -> int:
+        """获取对话消息数量"""
+        try:
+            with self.pool.get_connection() as conn:
+                cursor = conn.execute(
+                    "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?",
+                    (conversation_id,)
+                )
+                return cursor.fetchone()[0]
+        except Exception as e:
+            logger.error(f"获取消息数量失败: {e}", exc_info=True)
+            return 0
+
+    def get_conversation_token_count(self, conversation_id: str, chars_per_token: int = 3) -> int:
+        """估算对话的 token 数量"""
+        try:
+            with self.pool.get_connection() as conn:
+                cursor = conn.execute("""
+                    SELECT SUM(LENGTH(content)) FROM conversation_messages WHERE conversation_id = ?
+                """, (conversation_id,))
+                total_chars = cursor.fetchone()[0] or 0
+                return total_chars // chars_per_token
+        except Exception as e:
+            logger.error(f"计算 token 数量失败: {e}", exc_info=True)
+            return 0
+
+    def truncate_conversation_to_max_tokens(self, conversation_id: str, max_tokens: int = 80000, chars_per_token: int = 3) -> bool:
+        """
+        截断对话历史，使其不超过指定 token 限制
+
+        保留最新的消息，删除最旧的消息
+        """
+        try:
+            current_tokens = self.get_conversation_token_count(conversation_id, chars_per_token)
+
+            if current_tokens <= max_tokens:
+                return True  # 不需要截断
+
+            # 从后往前遍历，找到需要保留的起始索引
+            with self.pool.get_connection() as conn:
+                cursor = conn.execute("""
+                    SELECT message_index, LENGTH(content) as content_length
+                    FROM conversation_messages
+                    WHERE conversation_id = ?
+                    ORDER BY message_index DESC
+                """, (conversation_id,))
+
+                tokens_to_keep = 0
+                keep_index = 0
+
+                for row in cursor.fetchall():
+                    msg_tokens = row["content_length"] // chars_per_token
+                    if tokens_to_keep + msg_tokens <= max_tokens:
+                        tokens_to_keep += msg_tokens
+                        keep_index = row["message_index"]
+                    else:
+                        break
+
+                # 删除保留索引之前的所有消息
+                if keep_index > 0:
+                    self.delete_messages_before(conversation_id, keep_index)
+
+            return True
+        except Exception as e:
+            logger.error(f"截断对话历史失败: {e}", exc_info=True)
+            return False
+
     def clean_expired_conversations(self, hours: int = 2) -> int:
         """清理指定小时数之前的对话上下文"""
         try:
