@@ -152,10 +152,6 @@ PROXY_PORT=8000
 # 日志配置
 LOG_FILE=feishu_proxy.log
 
-# iFlow CLI 配置
-IFLOW_API_URL=http://localhost:8080
-```
-
 ### 扩展配置
 
 - **天气扩展**：无需额外配置，使用 wttr.in 免费服务
