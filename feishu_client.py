@@ -394,3 +394,102 @@ class FeishuClient:
             }
         }
         return self.reply_message(message_id, "post", content)
+    
+    def get_message_resource(self, message_id: str, file_key: str, resource_type: str = "file") -> Optional[str]:
+        """获取消息中的资源文件信息（直接下载文件）
+
+        Args:
+            message_id: 消息 ID
+            file_key: 文件 key
+            resource_type: 资源类型，默认为 "file"
+
+        Returns:
+            str: 下载成功返回保存的文件路径，失败返回 None
+        """
+        import os
+        
+        if not self.tenant_access_token:
+            self.get_tenant_access_token()
+        
+        url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/resources/{file_key}?type={resource_type}"
+        headers = {
+            "Authorization": f"Bearer {self.tenant_access_token}"
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=30, stream=True)
+            
+            if response.status_code != 200:
+                logger.error(f"获取消息资源失败: HTTP {response.status_code}, 响应={response.text}")
+                return None
+            
+            # 创建临时目录
+            os.makedirs("temp", exist_ok=True)
+            
+            # 根据资源类型确定文件扩展名
+            ext_map = {
+                "audio": ".m4a",
+                "image": ".png",
+                "file": ".bin",
+                "video": ".mp4"
+            }
+            ext = ext_map.get(resource_type, ".bin")
+            
+            # 保存文件
+            file_path = f"temp/resource_{message_id}{ext}"
+            
+            with open(file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            logger.info(f"消息资源下载成功: {file_path}")
+            return file_path
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"获取消息资源请求失败: {e}")
+            return None
+        except IOError as e:
+            logger.error(f"保存文件失败: {e}")
+            return None
+    
+    def download_file(self, file_token: str, save_path: str) -> bool:
+        """下载文件到本地
+
+        Args:
+            file_token: 文件 token（从 get_message_resource 获取）
+            save_path: 保存文件的本地路径
+
+        Returns:
+            bool: 下载是否成功
+        """
+        if not self.tenant_access_token:
+            self.get_tenant_access_token()
+        
+        url = f"https://open.feishu.cn/open-apis/drive/v1/medias/{file_token}/download"
+        headers = {
+            "Authorization": f"Bearer {self.tenant_access_token}"
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=30, stream=True)
+            
+            if response.status_code != 200:
+                logger.error(f"下载文件失败: HTTP {response.status_code}")
+                return False
+            
+            # 写入文件
+            with open(save_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            logger.info(f"文件下载成功: {save_path}")
+            return True
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"下载文件请求失败: {e}")
+            return False
+        except IOError as e:
+            logger.error(f"写入文件失败: {e}")
+            return False

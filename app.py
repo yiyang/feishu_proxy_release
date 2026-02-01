@@ -3,6 +3,8 @@ from fastapi.responses import JSONResponse
 import json
 import logging
 import time
+import requests
+import whisper
 from config import config
 from feishu_client import FeishuClient
 from llm_client import LLMClient
@@ -45,6 +47,9 @@ app = FastAPI(title="飞书代理服务")
 feishu_client = FeishuClient()
 llm_client = LLMClient()
 event_db = get_event_db()
+
+# Whisper 音频识别模型（全局变量，服务启动时加载）
+whisper_model = None
 
 
 @app.get("/")
@@ -132,12 +137,15 @@ async def handle_message_event(event_data: dict):
     """
     处理消息事件
     """
+    import os
+    
     try:
         event = event_data.get("event", {})
         message = event.get("message", {})
         
         # 获取消息内容和发送者信息
         message_id = message.get("message_id")
+        msg_type = message.get("message_type", "")
         content = json.loads(message.get("content", "{}"))
         text = content.get("text", "").strip()
         
@@ -152,7 +160,73 @@ async def handle_message_event(event_data: dict):
             logger.info("忽略机器人自己的消息")
             return
         
-        logger.info(f"收到消息 - 发送者: {sender_id}, 内容: {text}")
+        logger.info(f"收到消息 - 发送者: {sender_id}, 消息类型: {msg_type}")
+        
+        # 处理音频消息
+        if msg_type == "audio":
+            logger.info("检测到音频消息，开始处理...")
+            file_key = content.get("file_key")
+            
+            if not file_key:
+                logger.error("音频消息缺少 file_key")
+                return
+            
+            # 直接下载音频文件（使用 "file" 类型）
+            audio_file_path = feishu_client.get_message_resource(message_id, file_key, "file")
+            if not audio_file_path:
+                logger.error("下载音频文件失败")
+                return
+            
+            logger.info(f"音频文件已下载: {audio_file_path}")
+            
+            # 使用 Whisper 识别音频
+            try:
+                # 转换为 wav 格式（确保兼容性）
+                if audio_file_path.endswith(".bin"):
+                    wav_file_path = audio_file_path[:-4] + ".wav"
+                else:
+                    wav_file_path = audio_file_path.rsplit(".", 1)[0] + ".wav"
+                
+                import subprocess
+                # 转换为标准 wav 格式
+                subprocess.run(
+                    ["ffmpeg", "-i", audio_file_path, "-ar", "16000", "-ac", "1", wav_file_path],
+                    capture_output=True,
+                    check=True
+                )
+                
+                logger.info(f"音频转换完成: {wav_file_path}")
+                
+                # 使用 Whisper 转录音频
+                if whisper_model is None:
+                    logger.error("Whisper 模型未加载")
+                    feishu_client.reply_text_message(message_id, "抱歉，语音识别服务未初始化")
+                    return
+                
+                result = whisper_model.transcribe(wav_file_path, language="zh")
+                text = result.get("text", "").strip()
+                
+                if text:
+                    logger.info(f"音频转录成功: {text[:100]}...")
+                else:
+                    text = "（语音内容未能识别）"
+                    logger.warning("Whisper 返回空文本")
+                
+            except Exception as e:
+                logger.error(f"音频转录失败: {e}", exc_info=True)
+                feishu_client.reply_text_message(message_id, "抱歉，无法识别语音内容")
+                return
+            
+            # 清理临时文件
+            try:
+                if os.path.exists(audio_file_path):
+                    os.remove(audio_file_path)
+                if 'wav_file_path' in locals() and os.path.exists(wav_file_path):
+                    os.remove(wav_file_path)
+            except Exception as e:
+                logger.warning(f"清理临时文件失败: {e}")
+        
+        logger.info(f"处理后的文本内容: {text}")
         
         # 从数据库获取对话上下文
         conversation_data = event_db.get_conversation_context(chat_id)
@@ -199,6 +273,12 @@ async def startup_event():
         # 预获取 tenant_access_token
         feishu_client.get_tenant_access_token()
         logger.info("飞书客户端初始化成功")
+
+        # 加载 Whisper 模型
+        global whisper_model
+        logger.info("正在加载 Whisper 模型...")
+        whisper_model = whisper.load_model("base")
+        logger.info("Whisper 模型加载成功")
 
         # 启动定期清理任务
         import asyncio
