@@ -42,9 +42,6 @@
 │   ├── __init__.py
 │   ├── README.md               # 扩展开发指南
 │   ├── example_extension.py    # 示例扩展（天气查询）
-│   ├── weather_extension.py    # 天气查询扩展
-│   ├── tea_recommendation_extension.py  # 茶叶推荐扩展
-│   ├── paper_recommendation_extension.py # 论文推荐扩展
 │   └── message_forward_extension.py     # 消息转发扩展
 ├── temp/                       # 临时文件目录
 └── feishu_proxy.db             # SQLite 数据库文件
@@ -284,33 +281,6 @@ class MyExtension(ExtensionBase):
 1. **清理旧事件**：每小时清理一次 24 小时前的事件记录
 2. **清理过期对话**：每 30 分钟清理一次 2 小时前的对话上下文
 
-## 工具脚本
-
-### get_my_openid.py
-
-获取当前用户的 OpenID。
-
-```bash
-python get_my_openid.py
-```
-
-### check_db.py
-
-检查数据库状态。
-
-```bash
-python check_db.py
-```
-
-### send_*.py
-
-各种消息发送测试脚本：
-- `send_ai_dialogue.py`：发送 AI 对话
-- `send_file_reply.py`：发送文件回复
-- `send_markdown.py`：发送 Markdown 消息
-- `send_md_file.py`：发送 Markdown 文件
-- `send_ppt.py`：发送 PPT
-
 ## 常见问题
 
 ### 服务无法启动
@@ -362,8 +332,8 @@ python check_db.py
 
 ## 许可证
 
-本项目为内部项目，仅供授权用户使用。
+MIT 许可证。
 
 ## 联系方式
 
-如有问题，请联系项目维护者。
+如有问题，请联系项目维护者 https://github.com/yiyang （半熟的熊猫）
