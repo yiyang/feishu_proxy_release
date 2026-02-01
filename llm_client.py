@@ -7,6 +7,7 @@ from datetime import datetime
 from config import config
 from extension_loader import ExtensionLoader
 from database import get_event_db
+from jinshentan_client import get_jinshentan_client
 
 logger = logging.getLogger(__name__)
 
@@ -282,19 +283,31 @@ class LLMClient:
                     try:
                         extension_result = extension.handle(message, conversation_id)
                         if extension_result is not None:
+                            # 添加到对话历史（注意：只记录扩展回复，不记录金圣叹评论）
+                            self._add_to_history(conversation_id, "user", message)
+                            self._add_to_history(conversation_id, "assistant", extension_result)
+
+                            # 生成金圣叹评论
+                            jinshentan = get_jinshentan_client()
+                            comment = jinshentan.generate_comment(message, extension_result)
+
                             # 检查是否包含 ---STAGE--- 分隔符
                             if "---STAGE---" in extension_result:
                                 messages = [msg.strip() for msg in extension_result.split("---STAGE---") if msg.strip()]
                                 logger.debug(f"扩展返回分段消息，共 {len(messages)} 条")
-                                # 添加到对话历史
-                                self._add_to_history(conversation_id, "user", message)
-                                self._add_to_history(conversation_id, "assistant", extension_result)
+
+                                # 如果有金圣叹评论，添加到消息列表最前面
+                                if comment:
+                                    messages.insert(0, f"💬 **金圣叹评论**\n\n{comment}")
+
                                 return messages, conversation_id
                             else:
                                 # 单条消息
-                                self._add_to_history(conversation_id, "user", message)
-                                self._add_to_history(conversation_id, "assistant", extension_result)
-                                return extension_result, conversation_id
+                                if comment:
+                                    combined = f"💬 **金圣叹评论**\n\n{comment}\n\n---\n\n{extension_result}"
+                                    return combined, conversation_id
+                                else:
+                                    return extension_result, conversation_id
                     except Exception as e:
                         logger.error(f"扩展 {extension_name} 处理失败: {e}", exc_info=True)
             
@@ -348,19 +361,32 @@ class LLMClient:
             # 记录这个回复已发送
             self.sent_replies[conversation_id].add(response_hash)
 
+            # 添加用户消息和完整的 AI 回复到历史（注意：金圣叹评论不加入历史）
+            self._add_to_history(conversation_id, "user", message)
+            self._add_to_history(conversation_id, "assistant", response)
+
+            # 生成金圣叹评论（一次性，不加入历史）
+            jinshentan = get_jinshentan_client()
+            comment = jinshentan.generate_comment(message, response)
+
             # 解析 ---STAGE--- 分隔符，拆分成多条消息
             if "---STAGE---" in response:
                 messages = [msg.strip() for msg in response.split("---STAGE---") if msg.strip()]
                 logger.debug(f"检测到分段消息，共 {len(messages)} 条")
-                # 添加用户消息和完整的 AI 回复到历史
-                self._add_to_history(conversation_id, "user", message)
-                self._add_to_history(conversation_id, "assistant", response)
+
+                # 如果有金圣叹评论，添加到消息列表最前面
+                if comment:
+                    messages.insert(0, f"💬 **金圣叹评论**\n\n{comment}")
+
                 return messages, conversation_id
             else:
                 # 单条消息
-                self._add_to_history(conversation_id, "user", message)
-                self._add_to_history(conversation_id, "assistant", response)
-                return response, conversation_id
+                if comment:
+                    # 如果有评论，组合返回：评论 + 助手回复
+                    combined = f"💬 **金圣叹评论**\n\n{comment}\n\n---\n\n{response}"
+                    return combined, conversation_id
+                else:
+                    return response, conversation_id
             
         except subprocess.TimeoutExpired:
             logger.error("iFlow CLI 执行超时")
